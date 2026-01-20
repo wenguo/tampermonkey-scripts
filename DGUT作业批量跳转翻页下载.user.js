@@ -6,6 +6,8 @@
 // @author       You
 // @match        https://hw.dgut.edu.cn/teacher/course/*/homeworkPlan*
 // @match        https://hw.dgut.edu.cn/teacher/homeworkPlan/*/homework*
+// @updateURL    https://cdn.jsdelivr.net/gh/wenguo/tampermonkey-scripts@main/DGUT%E4%BD%9C%E4%B8%9A%E6%89%B9%E9%87%8F%E8%B7%B3%E8%BD%AC%E7%BF%BB%E9%A1%B5%E4%B8%8B%E8%BD%BD.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/wenguo/tampermonkey-scripts@main/DGUT%E4%BD%9C%E4%B8%9A%E6%89%B9%E9%87%8F%E8%B7%B3%E8%BD%AC%E7%BF%BB%E9%A1%B5%E4%B8%8B%E8%BD%BD.user.js
 // @grant        none
 // ==/UserScript==
 
