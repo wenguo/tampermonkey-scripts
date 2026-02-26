@@ -76,53 +76,51 @@
   let currentSheetName = "";
 
   /***********************
-   * Debug UI
+   * Dock UI (left panel + right debug)
    ***********************/
+  const DOCK_UI_STORE_POS = "AUTO_GRADE_DOCK_POS_V1";
+  const LEFT_UI_STORE_POS = "AUTO_GRADE_LEFT_UI_POS_V1";
   const DBG_UI_STORE_POS = "AUTO_GRADE_DBG_POS_V1";
-  const DBG_UI_STORE_STATE = "AUTO_GRADE_DBG_STATE_V1";
 
-  const dbgBox = document.createElement("div");
-  dbgBox.style =
-    "position: fixed; z-index: 10001; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 620px; max-height: 420px; padding: 0; font-size: 12px; background: rgba(0,0,0,0.72); color: #fff; border-radius: 10px; line-height: 1.5; box-shadow: 0 10px 30px rgba(0,0,0,0.35);";
+  const dock = document.createElement("div");
+  dock.style =
+    "position: fixed; z-index: 10001; top: 10px; left: 10px; width: 960px; max-width: calc(100vw - 20px); max-height: calc(100vh - 20px); background: rgba(255,255,255,0.92); border: 1px solid rgba(0,0,0,0.18); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.22); overflow: hidden;";
 
-  const dbgHeader = document.createElement("div");
-  dbgHeader.style =
-    "display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.15); cursor: move; user-select: none;";
+  const dockHeader = document.createElement("div");
+  dockHeader.style =
+    "padding: 8px 10px; font-size: 13px; font-weight: 700; color: #111; background: rgba(0,0,0,0.03); border-bottom: 1px solid rgba(0,0,0,0.08); cursor: move; user-select: none;";
+  dockHeader.textContent = "AutoGrade";
+
+  const dockBody = document.createElement("div");
+  dockBody.style =
+    "display: flex; align-items: stretch; gap: 12px; padding: 10px; box-sizing: border-box; max-height: calc(100vh - 70px);";
+
+  const dockLeft = document.createElement("div");
+  dockLeft.style = "width: 240px; flex: 0 0 240px; display: flex; flex-direction: column; gap: 8px;";
+
+  const dockRight = document.createElement("div");
+  dockRight.style = "flex: 1 1 auto; min-width: 320px; display: flex; flex-direction: column;";
 
   const dbgTitle = document.createElement("div");
-  dbgTitle.textContent = "Debug (AutoGrade)";
-  dbgTitle.style = "font-weight: 700; letter-spacing: 0.2px; opacity: 0.95;";
-
-  const dbgBtnBar = document.createElement("div");
-  dbgBtnBar.style = "display: flex; align-items: center; gap: 8px;";
-
-  const dbgToggleBtn = document.createElement("button");
-  dbgToggleBtn.type = "button";
-  dbgToggleBtn.textContent = "折叠";
-  dbgToggleBtn.style =
-    "border: 1px solid rgba(255,255,255,0.25); background: rgba(255,255,255,0.08); color: #fff; border-radius: 8px; padding: 4px 8px; cursor: pointer;";
+  dbgTitle.textContent = "Debug";
+  dbgTitle.style = "font-size: 12px; font-weight: 700; color: #111; margin-bottom: 8px;";
 
   const dbgBody = document.createElement("pre");
   dbgBody.style =
-    "margin: 0; padding: 10px; max-height: 380px; overflow: auto; white-space: pre-wrap; word-break: break-word;";
+    "margin: 0; padding: 10px; flex: 1 1 auto; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.45; background: rgba(0,0,0,0.72); color: #fff; border-radius: 10px; box-sizing: border-box;";
   dbgBody.textContent = "Debug: ready\n";
 
-  dbgBtnBar.appendChild(dbgToggleBtn);
-  dbgHeader.appendChild(dbgTitle);
-  dbgHeader.appendChild(dbgBtnBar);
-  dbgBox.appendChild(dbgHeader);
-  dbgBox.appendChild(dbgBody);
-  document.body.appendChild(dbgBox);
+  dockRight.appendChild(dbgTitle);
+  dockRight.appendChild(dbgBody);
+  dockBody.appendChild(dockLeft);
+  dockBody.appendChild(dockRight);
+  dock.appendChild(dockHeader);
+  dock.appendChild(dockBody);
+  document.body.appendChild(dock);
 
-  function dbgApplyCollapsed(collapsed) {
-    const isCollapsed = !!collapsed;
-    dbgBody.style.display = isCollapsed ? "none" : "block";
-    dbgToggleBtn.textContent = isCollapsed ? "展开" : "折叠";
-  }
-
-  function dbgLoadPos() {
+  function loadPosFromStore(key) {
     try {
-      const raw = localStorage.getItem(DBG_UI_STORE_POS);
+      const raw = localStorage.getItem(key);
       if (!raw) return null;
       const p = JSON.parse(raw);
       if (!p || typeof p.left !== "number" || typeof p.top !== "number") return null;
@@ -132,75 +130,46 @@
     }
   }
 
-  function dbgSavePos(left, top) {
+  function saveDockPos(left, top) {
     try {
-      localStorage.setItem(DBG_UI_STORE_POS, JSON.stringify({ left, top }));
+      localStorage.setItem(DOCK_UI_STORE_POS, JSON.stringify({ left, top }));
     } catch (_) {}
   }
 
-  function dbgLoadCollapsed() {
-    try {
-      return localStorage.getItem(DBG_UI_STORE_STATE) === "collapsed";
-    } catch (_) {
-      return false;
-    }
+  // Restore position: new dock pos -> old left panel pos -> old debug pos
+  const dockSaved = loadPosFromStore(DOCK_UI_STORE_POS) || loadPosFromStore(LEFT_UI_STORE_POS) || loadPosFromStore(DBG_UI_STORE_POS);
+  if (dockSaved) {
+    dock.style.left = `${dockSaved.left}px`;
+    dock.style.top = `${dockSaved.top}px`;
   }
-
-  function dbgSaveCollapsed(collapsed) {
-    try {
-      localStorage.setItem(DBG_UI_STORE_STATE, collapsed ? "collapsed" : "expanded");
-    } catch (_) {}
-  }
-
-  // Restore collapsed state
-  dbgApplyCollapsed(dbgLoadCollapsed());
-
-  // Restore position (if any), otherwise keep centered via transform
-  const savedPos = dbgLoadPos();
-  if (savedPos) {
-    dbgBox.style.left = `${savedPos.left}px`;
-    dbgBox.style.top = `${savedPos.top}px`;
-    dbgBox.style.transform = "none";
-  }
-
-  // Toggle collapse
-  dbgToggleBtn.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    const collapsed = dbgBody.style.display !== "none";
-    dbgApplyCollapsed(collapsed);
-    dbgSaveCollapsed(collapsed);
-  });
 
   // Drag support (header only)
-  let dbgDragging = false;
-  let dbgDragOffX = 0;
-  let dbgDragOffY = 0;
+  let dockDragging = false;
+  let dockDragOffX = 0;
+  let dockDragOffY = 0;
 
-  dbgHeader.addEventListener("mousedown", (ev) => {
-    // If user clicks the button area, do not start dragging
-    if (ev.target === dbgToggleBtn) return;
+  dockHeader.addEventListener("mousedown", (ev) => {
     if (ev.button !== 0) return;
-    const rect = dbgBox.getBoundingClientRect();
-    dbgDragging = true;
-    dbgDragOffX = ev.clientX - rect.left;
-    dbgDragOffY = ev.clientY - rect.top;
-    dbgBox.style.transform = "none";
+    const rect = dock.getBoundingClientRect();
+    dockDragging = true;
+    dockDragOffX = ev.clientX - rect.left;
+    dockDragOffY = ev.clientY - rect.top;
     ev.preventDefault();
   });
 
   window.addEventListener("mousemove", (ev) => {
-    if (!dbgDragging) return;
-    const left = Math.max(0, ev.clientX - dbgDragOffX);
-    const top = Math.max(0, ev.clientY - dbgDragOffY);
-    dbgBox.style.left = `${left}px`;
-    dbgBox.style.top = `${top}px`;
+    if (!dockDragging) return;
+    const left = Math.max(0, ev.clientX - dockDragOffX);
+    const top = Math.max(0, ev.clientY - dockDragOffY);
+    dock.style.left = `${left}px`;
+    dock.style.top = `${top}px`;
   });
 
   window.addEventListener("mouseup", () => {
-    if (!dbgDragging) return;
-    dbgDragging = false;
-    const rect = dbgBox.getBoundingClientRect();
-    dbgSavePos(rect.left, rect.top);
+    if (!dockDragging) return;
+    dockDragging = false;
+    const rect = dock.getBoundingClientRect();
+    saveDockPos(rect.left, rect.top);
   });
 
   const dbgLines = [];
@@ -530,82 +499,13 @@
   /***********************
    * UI：文件/Sheet/扫描差异/开始更新/暂停/导出日志
    ***********************/
-  const LEFT_UI_STORE_POS = "AUTO_GRADE_LEFT_UI_POS_V1";
-
-  const leftPanel = document.createElement("div");
-  leftPanel.style =
-    "position: fixed; z-index: 10000; top: 10px; left: 10px; width: 220px; background: rgba(255,255,255,0.92); border: 1px solid rgba(0,0,0,0.18); border-radius: 12px; box-shadow: 0 8px 22px rgba(0,0,0,0.18); overflow: hidden;";
-
-  const leftHeader = document.createElement("div");
-  leftHeader.style =
-    "padding: 8px 10px; font-size: 13px; font-weight: 700; color: #111; background: rgba(0,0,0,0.03); border-bottom: 1px solid rgba(0,0,0,0.08); cursor: move; user-select: none;";
-  leftHeader.textContent = "AutoGrade";
-
-  const leftBody = document.createElement("div");
-  leftBody.style = "padding: 10px; display: flex; flex-direction: column; gap: 8px;";
-
-  leftPanel.appendChild(leftHeader);
-  leftPanel.appendChild(leftBody);
-  document.body.appendChild(leftPanel);
-
-  function leftUiLoadPos() {
-    try {
-      const raw = localStorage.getItem(LEFT_UI_STORE_POS);
-      if (!raw) return null;
-      const p = JSON.parse(raw);
-      if (!p || typeof p.left !== "number" || typeof p.top !== "number") return null;
-      return p;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  function leftUiSavePos(left, top) {
-    try {
-      localStorage.setItem(LEFT_UI_STORE_POS, JSON.stringify({ left, top }));
-    } catch (_) {}
-  }
-
-  const leftSavedPos = leftUiLoadPos();
-  if (leftSavedPos) {
-    leftPanel.style.left = `${leftSavedPos.left}px`;
-    leftPanel.style.top = `${leftSavedPos.top}px`;
-  }
-
-  let leftDragging = false;
-  let leftDragOffX = 0;
-  let leftDragOffY = 0;
-
-  leftHeader.addEventListener("mousedown", (ev) => {
-    if (ev.button !== 0) return;
-    const rect = leftPanel.getBoundingClientRect();
-    leftDragging = true;
-    leftDragOffX = ev.clientX - rect.left;
-    leftDragOffY = ev.clientY - rect.top;
-    ev.preventDefault();
-  });
-
-  window.addEventListener("mousemove", (ev) => {
-    if (!leftDragging) return;
-    const left = Math.max(0, ev.clientX - leftDragOffX);
-    const top = Math.max(0, ev.clientY - leftDragOffY);
-    leftPanel.style.left = `${left}px`;
-    leftPanel.style.top = `${top}px`;
-  });
-
-  window.addEventListener("mouseup", () => {
-    if (!leftDragging) return;
-    leftDragging = false;
-    const rect = leftPanel.getBoundingClientRect();
-    leftUiSavePos(rect.left, rect.top);
-  });
-
+  // Controls live in the dock's left column.
   const fileInput = document.createElement("input");
   fileInput.type = "file";
   fileInput.accept = ".xlsx,.xls";
   fileInput.style = `${buttonStyle} background: #fff; color: #111; border: 1px solid rgba(0,0,0,0.25);`;
   fileInput.addEventListener("change", handleFile);
-  leftBody.appendChild(fileInput);
+  dockLeft.appendChild(fileInput);
 
   const sheetSelect = document.createElement("select");
   sheetSelect.style =
@@ -615,7 +515,7 @@
     currentSheetName = sheetSelect.value || "";
     dbg(`选择sheet: ${currentSheetName}`);
   });
-  leftBody.appendChild(sheetSelect);
+  dockLeft.appendChild(sheetSelect);
 
   const scanButton = document.createElement("button");
   scanButton.textContent = "扫描差异(预览)";
@@ -626,7 +526,7 @@
     const plan = buildUpdatePlan(currentSheetName);
     showPlanPreview(plan);
   });
-  leftBody.appendChild(scanButton);
+  dockLeft.appendChild(scanButton);
 
   const startButton = document.createElement("button");
   startButton.textContent = "开始更新(仅差异)";
@@ -637,7 +537,7 @@
     isPaused = false;
     runUpdatePlan().catch((e) => console.error("[AutoGrade] 执行异常:", e));
   });
-  leftBody.appendChild(startButton);
+  dockLeft.appendChild(startButton);
 
   const pauseButton = document.createElement("button");
   pauseButton.textContent = "暂停";
@@ -646,16 +546,16 @@
     isPaused = true;
     dbg("已暂停");
   });
-  leftBody.appendChild(pauseButton);
+  dockLeft.appendChild(pauseButton);
 
   const exportLogButton = document.createElement("button");
   exportLogButton.textContent = "导出日志CSV";
   exportLogButton.style = `${buttonStyle} background: #17a2b8; color: white;`;
   exportLogButton.addEventListener("click", () => exportLogsCsv());
-  leftBody.appendChild(exportLogButton);
+  dockLeft.appendChild(exportLogButton);
 
   // Status box goes into the left panel (avoid overlap)
-  leftBody.appendChild(statBox);
+  dockLeft.appendChild(statBox);
 
   /***********************
    * 日志CSV
