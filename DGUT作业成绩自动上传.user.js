@@ -1,13 +1,12 @@
 // ==UserScript==
-// @name         作业成绩自动填写（多Sheet手动选择·最终版+延时+日志）
+// @name         作业成绩自动填写（多Sheet手动选择·最终版+延时+日志+抽样等级）
 // @namespace    http://tampermonkey.net/
-// @version      6.0
-// @description  多sheet读取并手动选择；自动扫描表头行解决“只识别课程设计”；成绩写入用原生setter+事件链解决“成绩不保存”；每次写入成绩后延时2秒测试；自动统计并可导出CSV日志
+// @version      6.1
+// @description  多sheet读取并手动选择；自动扫描表头行；成绩写入用原生setter+事件链；写完成绩后延时2秒；自动设置“抽样等级”(优/良/中/差)；统计并可导出CSV日志
 // @author       YourName
 // @match        https://hw.dgut.edu.cn/teacher/homeworkPlan/*/mark
 // @updateURL    https://cdn.jsdelivr.net/gh/wenguo/tampermonkey-scripts@main/DGUT%E4%BD%9C%E4%B8%9A%E6%88%90%E7%BB%A9%E8%87%AA%E5%8A%A8%E4%B8%8A%E4%BC%A0.user.js
 // @downloadURL  https://cdn.jsdelivr.net/gh/wenguo/tampermonkey-scripts@main/DGUT%E4%BD%9C%E4%B8%9A%E6%88%90%E7%BB%A9%E8%87%AA%E5%8A%A8%E4%B8%8A%E4%BC%A0.user.js
-// @grant        none
 // @grant        none
 // @require      https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js
 // ==/UserScript==
@@ -48,15 +47,13 @@
   const LOAD_MSG_MAX_RETRIES = 12;
   const LOAD_MSG_INTERVAL = 500;
 
-  // ✅ 你要的：每次输入完成绩后额外延时2秒用于测试
+  // ✅ 写完成绩后额外延时2秒用于测试
   const GRADE_INPUT_TEST_DELAY_MS = 2000;
 
   const buttonStyle =
     "position: fixed; z-index: 9999; width: 190px; height: 40px; font-size: 14px; border: none; padding: 10px; cursor: pointer;";
 
   let isPaused = false;
-
-  // { sheetName: [{学号,姓名,成绩,评语}, ...] }
   let studentDataBySheet = {};
   let currentSheetName = "";
 
@@ -273,7 +270,74 @@
   }
 
   /***********************
-   * ✅ 表头扫描 + 模糊匹配（解决只识别课程设计）
+   * 抽样等级（精准定位：p“抽样等级” 的 nextElementSibling）
+   ***********************/
+  function scoreToLevel(scoreNum) {
+    if (scoreNum >= 90 && scoreNum <= 100) return "优";
+    if (scoreNum >= 80 && scoreNum <= 89) return "良";
+    if (scoreNum >= 70 && scoreNum <= 79) return "中";
+    return "差";
+  }
+
+  function findSamplingSelectExact() {
+    const ps = Array.from(document.querySelectorAll("p")).filter(
+      (p) => normText(p.innerText) === "抽样等级"
+    );
+    for (const p of ps) {
+      const next = p.nextElementSibling;
+      if (next && next.classList && next.classList.contains("ivu-select")) {
+        return next;
+      }
+    }
+    return null;
+  }
+
+  async function setSamplingLevel(levelText) {
+    const sel = findSamplingSelectExact();
+    if (!sel) {
+      console.warn("[AutoGrade] 未找到“抽样等级”下拉框（p->nextElementSibling）");
+      return false;
+    }
+
+    const current = normText(sel.querySelector(".ivu-select-selected-value")?.innerText || "");
+    if (current === levelText) return true;
+
+    const selection = sel.querySelector(".ivu-select-selection");
+    if (!selection) return false;
+
+    // 打开下拉
+    selection.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    selection.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await sleep(120);
+
+    // dropdown 可能挂在 body 下，全局找可见 dropdown
+    const dropdowns = Array.from(document.querySelectorAll(".ivu-select-dropdown"));
+    const visible = dropdowns.find((d) => d.offsetParent !== null) || dropdowns[dropdowns.length - 1];
+    if (!visible) {
+      console.warn("[AutoGrade] 未找到可见的下拉列表");
+      return false;
+    }
+
+    const items = Array.from(visible.querySelectorAll(".ivu-select-dropdown-list .ivu-select-item"));
+    const target = items.find((li) => normText(li.innerText) === levelText);
+    if (!target) {
+      console.warn("[AutoGrade] 下拉列表里没找到等级项:", levelText);
+      document.body.click();
+      return false;
+    }
+
+    target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    target.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+
+    await sleep(120);
+    selection.dispatchEvent(new Event("change", { bubbles: true }));
+    selection.dispatchEvent(new Event("blur", { bubbles: true }));
+    return true;
+  }
+
+  /***********************
+   * 表头扫描 + 模糊匹配（解决只识别课程设计）
    ***********************/
   function detectHeaderRow(rows, maxScan = 30) {
     const mustHaveAnyGrade = EXCEL_COLS.grade.map(normText);
@@ -621,14 +685,19 @@
             return resolve();
           }
 
-          // ✅ 成绩：抽取数字，避免“85分/良好(85)”导致InputNumber不认
+          // 成绩：抽取数字
           const gradeStr = String(rec.成绩 ?? "").match(/-?\d+(\.\d+)?/)?.[0] ?? "";
           fillInputControlled(gradeInput, gradeStr);
 
-          // ✅ 你要的：写完成绩后延时2秒测试
+          // ✅ 写完成绩后延时2秒
           await sleep(GRADE_INPUT_TEST_DELAY_MS);
 
-          // 评语：允许为空
+          // ✅ 设置抽样等级（精准定位）
+          const scoreNum = Number(gradeStr);
+          if (!Number.isNaN(scoreNum)) {
+            await setSamplingLevel(scoreToLevel(scoreNum));
+          }
+
           if (remarkInput) fillInputControlled(remarkInput, rec.评语 || "");
 
           const submitButton = document.querySelector(submitButtonSelector);
