@@ -30,13 +30,19 @@
     id: ["学号", "学生学号", "ID", "StudentID"],
     name: ["姓名", "学生姓名", "Name"],
     grade: ["自动总分_调整后", "成绩"],
-    remark: ["评语", "详细评语", "批阅"],
+    remark: ["评语", "详细评语"],
   };
 
   const PAGE_INPUT_HINTS = {
     grade: ["请输入作业成绩", "作业成绩", "成绩", "得分", "分数"],
     remark: ["评语", "详细评语", "批阅", "点评", "意见", "备注"],
   };
+
+  // 站点真实提示文案（你日志里是“开始加载作业文件”）
+  const MSG_START_LOAD = "开始加载作业文件";
+  const MSG_LOAD_DONE = "加载完成";
+  const MSG_SAVE_UPLOADING = "保存并上传中";
+  const MSG_SUCCEEDED = "Succeeded";
 
   const FORCE_OVERWRITE = false;
 
@@ -55,8 +61,12 @@
 
   const AFTER_SUBMIT_DELAY = 1000;
 
+  // ✅ 点击提交后：等待“Succeeded”（可选）+ 最终“加载完成”（必须）
+  const WAIT_SUBMIT_SUCCEEDED_MAX_MS = 12000; // 有时会很快出现
+  const WAIT_AFTER_SUBMIT_LOAD_DONE_MAX_MS = 30000; // 提交后重新加载pdf
+
   // ✅ 防止单个学生卡死
-  const PER_STUDENT_HARD_TIMEOUT_MS = 45000;
+  const PER_STUDENT_HARD_TIMEOUT_MS = 60000;
 
   const DEBUG = true;
 
@@ -89,7 +99,7 @@
     const line = `[${nowIso()}] ${msg}`;
     console.log("[AutoGrade]", msg);
     dbgLines.push(line);
-    while (dbgLines.length > 60) dbgLines.shift();
+    while (dbgLines.length > 80) dbgLines.shift();
     dbgBox.textContent = dbgLines.join("\n");
   }
 
@@ -123,10 +133,9 @@
 
   /***********************
    * ✅ 轻量消息捕捉：只处理“新增的 message 节点”
-   * 关键：不用 body mutation 全局扫描（PDF自动加载时不会卡）
    ***********************/
   const messageHistory = []; // {ts, tms, seq, text}
-  const MESSAGE_HISTORY_MAX = 120;
+  const MESSAGE_HISTORY_MAX = 160;
   let lastMessageAt = 0;
   let msgSeq = 0;
 
@@ -144,7 +153,6 @@
     dbg(`捕捉消息: ${t}`);
   }
 
-  // 从一个节点里提取 span 文本（只在新增节点时调用）
   function extractMessageSpansFromNode(node) {
     if (!node || node.nodeType !== 1) return;
     const el = node;
@@ -171,7 +179,6 @@
           if (n.nodeType !== 1) continue;
           const el = n;
 
-          // 只处理：新增节点本身是 message 或包含 message（极大减少处理量）
           if (
             (el.matches && el.matches(messageRootSelector)) ||
             (el.querySelector && el.querySelector(messageRootSelector)) ||
@@ -189,7 +196,6 @@
     return obs;
   }
 
-  // ✅ 用“时间窗”等待（解决 sinceIndex 竞态/误排除问题）
   async function waitMessageSinceTime(substr, timeoutMs, sinceTimeMs, label) {
     dbg(
       `等待消息「${substr}」 label=${label || ""} timeout=${timeoutMs}ms sinceTime=${new Date(sinceTimeMs).toISOString()}`
@@ -207,7 +213,7 @@
       await sleep(120);
     }
 
-    dbg(`等待「${substr}」超时。最近消息：${messageHistory.slice(-8).map((x) => x.text).join(" | ") || "无"}`);
+    dbg(`等待「${substr}」超时。最近消息：${messageHistory.slice(-10).map((x) => x.text).join(" | ") || "无"}`);
     return { ok: false, hitSeq: -1 };
   }
 
@@ -227,11 +233,26 @@
     return false;
   }
 
-  // ✅ 等待PDF加载：以你站点实际文案为准（“开始加载作业文件”“加载完成”）
+  // ✅ 等待PDF加载（点击学生后）
   async function waitPdfLoadFlow(sinceTimeMs) {
-    await waitMessageSinceTime("开始加载作业文件", WAIT_START_LOAD_MAX_MS, sinceTimeMs, "start"); // 可选
-    const done = await waitMessageSinceTime("加载完成", WAIT_LOAD_DONE_MAX_MS, sinceTimeMs, "done"); // 必须
+    // start 是可选的：有时只弹“加载完成”
+    await waitMessageSinceTime(MSG_START_LOAD, WAIT_START_LOAD_MAX_MS, sinceTimeMs, "start");
+    const done = await waitMessageSinceTime(MSG_LOAD_DONE, WAIT_LOAD_DONE_MAX_MS, sinceTimeMs, "done");
     if (!done.ok) throw new Error("等待PDF“加载完成”超时（看右上角 Debug 最近消息）");
+    await waitSilence(AFTER_LOAD_SILENCE_MS, 5000);
+  }
+
+  // ✅ 点击提交后：等待保存/成功（可选）+ 最终“加载完成”（必须）
+  async function waitAfterSubmitFlow(sinceTimeMs) {
+    // 有些时候会出现“保存并上传中...”“Succeeded”
+    await waitMessageSinceTime(MSG_SAVE_UPLOADING, 5000, sinceTimeMs, "uploading"); // 可选，短等
+    await waitMessageSinceTime(MSG_SUCCEEDED, WAIT_SUBMIT_SUCCEEDED_MAX_MS, sinceTimeMs, "succeeded"); // 可选
+
+    // 提交后往往会重新触发加载pdf：开始加载作业文件 -> 加载完成
+    await waitMessageSinceTime(MSG_START_LOAD, 12000, sinceTimeMs, "reload_start"); // 可选
+    const done = await waitMessageSinceTime(MSG_LOAD_DONE, WAIT_AFTER_SUBMIT_LOAD_DONE_MAX_MS, sinceTimeMs, "reload_done");
+    if (!done.ok) throw new Error("提交后等待“加载完成”超时（可能保存未生效或页面未刷新）");
+
     await waitSilence(AFTER_LOAD_SILENCE_MS, 5000);
   }
 
@@ -632,13 +653,13 @@
           runLogs.push({ ts: nowIso(), sheet: sheetName, status: "SKIP", name: ps.name, sid: ps.sid || "", page_grade: res.pageGrade, excel_grade: excelGradeStr, page_level: res.pageLevel, excel_level: excelLevel, remark_preview: remarkPreview(rec.评语), note: "成绩与等级均一致，跳过" });
         } else {
           runSummary.updated++;
-          runLogs.push({ ts: nowIso(), sheet: sheetName, status: "UPDATED", name: ps.name, sid: ps.sid || "", page_grade: res.pageGrade, excel_grade: excelGradeStr, page_level: res.pageLevel, excel_level: excelLevel, remark_preview: remarkPreview(rec.评语), note: "已提交更新" });
+          runLogs.push({ ts: nowIso(), sheet: sheetName, status: "UPDATED", name: ps.name, sid: ps.sid || "", page_grade: res.pageGrade, excel_grade: excelGradeStr, page_level: res.pageLevel, excel_level: excelLevel, remark_preview: remarkPreview(rec.评语), note: "已提交更新并等待加载完成" });
         }
       } catch (e) {
         runSummary.failed++;
         runLogs.push({ ts: nowIso(), sheet: sheetName, status: "FAILED", name: ps.name, sid: ps.sid || "", page_grade: "", excel_grade: excelGradeStr, page_level: "", excel_level: excelLevel, remark_preview: remarkPreview(rec.评语), note: String(e?.message || e) });
         dbg(`失败/超时：${String(e?.message || e)}`);
-        dbg(`最近消息：${messageHistory.slice(-8).map((x) => x.text).join(" | ") || "无"}`);
+        dbg(`最近消息：${messageHistory.slice(-10).map((x) => x.text).join(" | ") || "无"}`);
       }
 
       setStat(`进行中 ${i + 1}/${runSummary.total}\n更新:${runSummary.updated} 跳过:${runSummary.skipped}\n未找到:${runSummary.notFound} 失败:${runSummary.failed}`);
@@ -654,7 +675,7 @@
   async function openCompareAndMaybeUpdate(pageStudent, rec, excelGradeStr, excelLevel) {
     dbg(`处理学生: ${pageStudent.name}`);
 
-    // ✅ 关键：用时间窗（解决自动加载/竞态导致的 sinceIndex 失效）
+    // ✅ 关键：用时间窗（解决自动加载/竞态）
     const sinceTime = Date.now();
 
     const studentElement = Array.from(document.querySelectorAll(studentCardSelector)).find((div) =>
@@ -718,10 +739,16 @@
 
     const submitButton = document.querySelector(submitButtonSelector);
     if (!submitButton) throw new Error("未找到提交按钮");
+
+    // ✅ 点击提交后，再等一轮“提交->重新加载->加载完成”
+    const submitSince = Date.now();
     dbg("点击提交");
     submitButton.click();
-    await sleep(AFTER_SUBMIT_DELAY);
 
+    dbg("提交后等待消息（Succeeded/加载完成）...");
+    await waitAfterSubmitFlow(submitSince);
+
+    await sleep(AFTER_SUBMIT_DELAY);
     return { status: "UPDATED", pageGrade: pageGradeNumStr, pageLevel };
   }
 
