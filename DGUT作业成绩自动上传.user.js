@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         作业成绩自动填写（多Sheet手动选择·最终版+延时+日志+抽样等级）
 // @namespace    http://tampermonkey.net/
-// @version      6.6
-// @description  多sheet手动选择；MutationObserver增量捕捉message；等待“加载完成”后再等待消息静默；比较成绩+抽样等级；步骤延时；日志CSV；防卡死超时跳过
+// @version      7.0
+// @description  先从左侧列表抓取【姓名/列表等级/列表成绩】→只更新不一致的学生；多sheet手动选择；轻量MutationObserver捕捉iView message；用“点击前时间窗”等待“开始加载作业文件/加载完成”；成绩输入后延时2秒；设置抽样等级；提交后等待再次“加载完成”再处理下一个；日志CSV导出；防卡死
 // @author       YourName
 // @match        https://hw.dgut.edu.cn/teacher/homeworkPlan/*/mark
 // @updateURL    https://cdn.jsdelivr.net/gh/wenguo/tampermonkey-scripts@main/DGUT%E4%BD%9C%E4%B8%9A%E6%88%90%E7%BB%A9%E8%87%AA%E5%8A%A8%E4%B8%8A%E4%BC%A0.user.js
@@ -11,7 +11,6 @@
 // @require      https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js
 // ==/UserScript==
 
-
 (function () {
   "use strict";
 
@@ -19,7 +18,7 @@
    * 可调配置
    ***********************/
   const submitButtonSelector = "button.score-operation-button.ivu-btn-success";
-  const studentCardSelector = ".ivu-card-body > div";
+  const studentCardSelector = ".ivu-card-body > div"; // 每个学生行
   const clickStudentLinkSelector = "a";
 
   // iView message：只抓 span（轻量）
@@ -38,40 +37,39 @@
     remark: ["评语", "详细评语", "批阅", "点评", "意见", "备注"],
   };
 
-  // 站点真实提示文案（你日志里是“开始加载作业文件”）
+  // 站点消息文案（以你日志为准）
   const MSG_START_LOAD = "开始加载作业文件";
   const MSG_LOAD_DONE = "加载完成";
   const MSG_SAVE_UPLOADING = "保存并上传中";
   const MSG_SUCCEEDED = "Succeeded";
 
-  const FORCE_OVERWRITE = false;
+  const FORCE_OVERWRITE = false; // true=无论一致与否都重写
+  const UPDATE_UNMARKED_ONLY = false; // true=只更新“未批阅”的（列表成绩为“未批阅”）
 
-  const AFTER_CLICK_DELAY = 300;
-  const STEP_DELAY_MS = 600;
+  const AFTER_CLICK_DELAY = 250;
+  const STEP_DELAY_MS = 500;
 
-  // ✅ 成绩输入后额外延时 2 秒（测试稳定性）
+  // ✅ 成绩输入后额外延时 2 秒
   const GRADE_INPUT_TEST_DELAY_MS = 2000;
 
   // 等消息超时
-  const WAIT_START_LOAD_MAX_MS = 8000;
-  const WAIT_LOAD_DONE_MAX_MS = 30000;
+  const WAIT_START_LOAD_MAX_MS = 9000;
+  const WAIT_LOAD_DONE_MAX_MS = 35000;
 
   // ✅ 加载完成后静默一小段
   const AFTER_LOAD_SILENCE_MS = 700;
 
-  const AFTER_SUBMIT_DELAY = 1000;
-
   // ✅ 点击提交后：等待“Succeeded”（可选）+ 最终“加载完成”（必须）
-  const WAIT_SUBMIT_SUCCEEDED_MAX_MS = 12000; // 有时会很快出现
-  const WAIT_AFTER_SUBMIT_LOAD_DONE_MAX_MS = 30000; // 提交后重新加载pdf
+  const WAIT_SUBMIT_SUCCEEDED_MAX_MS = 12000;
+  const WAIT_AFTER_SUBMIT_LOAD_DONE_MAX_MS = 35000;
 
   // ✅ 防止单个学生卡死
-  const PER_STUDENT_HARD_TIMEOUT_MS = 60000;
+  const PER_STUDENT_HARD_TIMEOUT_MS = 65000;
 
   const DEBUG = true;
 
   const buttonStyle =
-    "position: fixed; z-index: 9999; width: 190px; height: 40px; font-size: 14px; border: none; padding: 10px; cursor: pointer;";
+    "width: 100%; height: 36px; font-size: 14px; border: none; padding: 8px 10px; cursor: pointer; box-sizing: border-box; border-radius: 8px;";
 
   let isPaused = false;
   let studentDataBySheet = {};
@@ -80,11 +78,130 @@
   /***********************
    * Debug UI
    ***********************/
+  const DBG_UI_STORE_POS = "AUTO_GRADE_DBG_POS_V1";
+  const DBG_UI_STORE_STATE = "AUTO_GRADE_DBG_STATE_V1";
+
   const dbgBox = document.createElement("div");
   dbgBox.style =
-    "position: fixed; z-index: 9999; top: 10px; right: 10px; width: 560px; max-height: 360px; overflow: auto; padding: 10px; font-size: 12px; background: rgba(0,0,0,0.70); color: #fff; border-radius: 8px; line-height: 1.5; white-space: pre-wrap;";
-  dbgBox.textContent = "Debug: ready\n";
+    "position: fixed; z-index: 10001; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 620px; max-height: 420px; padding: 0; font-size: 12px; background: rgba(0,0,0,0.72); color: #fff; border-radius: 10px; line-height: 1.5; box-shadow: 0 10px 30px rgba(0,0,0,0.35);";
+
+  const dbgHeader = document.createElement("div");
+  dbgHeader.style =
+    "display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.15); cursor: move; user-select: none;";
+
+  const dbgTitle = document.createElement("div");
+  dbgTitle.textContent = "Debug (AutoGrade)";
+  dbgTitle.style = "font-weight: 700; letter-spacing: 0.2px; opacity: 0.95;";
+
+  const dbgBtnBar = document.createElement("div");
+  dbgBtnBar.style = "display: flex; align-items: center; gap: 8px;";
+
+  const dbgToggleBtn = document.createElement("button");
+  dbgToggleBtn.type = "button";
+  dbgToggleBtn.textContent = "折叠";
+  dbgToggleBtn.style =
+    "border: 1px solid rgba(255,255,255,0.25); background: rgba(255,255,255,0.08); color: #fff; border-radius: 8px; padding: 4px 8px; cursor: pointer;";
+
+  const dbgBody = document.createElement("pre");
+  dbgBody.style =
+    "margin: 0; padding: 10px; max-height: 380px; overflow: auto; white-space: pre-wrap; word-break: break-word;";
+  dbgBody.textContent = "Debug: ready\n";
+
+  dbgBtnBar.appendChild(dbgToggleBtn);
+  dbgHeader.appendChild(dbgTitle);
+  dbgHeader.appendChild(dbgBtnBar);
+  dbgBox.appendChild(dbgHeader);
+  dbgBox.appendChild(dbgBody);
   document.body.appendChild(dbgBox);
+
+  function dbgApplyCollapsed(collapsed) {
+    const isCollapsed = !!collapsed;
+    dbgBody.style.display = isCollapsed ? "none" : "block";
+    dbgToggleBtn.textContent = isCollapsed ? "展开" : "折叠";
+  }
+
+  function dbgLoadPos() {
+    try {
+      const raw = localStorage.getItem(DBG_UI_STORE_POS);
+      if (!raw) return null;
+      const p = JSON.parse(raw);
+      if (!p || typeof p.left !== "number" || typeof p.top !== "number") return null;
+      return p;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function dbgSavePos(left, top) {
+    try {
+      localStorage.setItem(DBG_UI_STORE_POS, JSON.stringify({ left, top }));
+    } catch (_) {}
+  }
+
+  function dbgLoadCollapsed() {
+    try {
+      return localStorage.getItem(DBG_UI_STORE_STATE) === "collapsed";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function dbgSaveCollapsed(collapsed) {
+    try {
+      localStorage.setItem(DBG_UI_STORE_STATE, collapsed ? "collapsed" : "expanded");
+    } catch (_) {}
+  }
+
+  // Restore collapsed state
+  dbgApplyCollapsed(dbgLoadCollapsed());
+
+  // Restore position (if any), otherwise keep centered via transform
+  const savedPos = dbgLoadPos();
+  if (savedPos) {
+    dbgBox.style.left = `${savedPos.left}px`;
+    dbgBox.style.top = `${savedPos.top}px`;
+    dbgBox.style.transform = "none";
+  }
+
+  // Toggle collapse
+  dbgToggleBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const collapsed = dbgBody.style.display !== "none";
+    dbgApplyCollapsed(collapsed);
+    dbgSaveCollapsed(collapsed);
+  });
+
+  // Drag support (header only)
+  let dbgDragging = false;
+  let dbgDragOffX = 0;
+  let dbgDragOffY = 0;
+
+  dbgHeader.addEventListener("mousedown", (ev) => {
+    // If user clicks the button area, do not start dragging
+    if (ev.target === dbgToggleBtn) return;
+    if (ev.button !== 0) return;
+    const rect = dbgBox.getBoundingClientRect();
+    dbgDragging = true;
+    dbgDragOffX = ev.clientX - rect.left;
+    dbgDragOffY = ev.clientY - rect.top;
+    dbgBox.style.transform = "none";
+    ev.preventDefault();
+  });
+
+  window.addEventListener("mousemove", (ev) => {
+    if (!dbgDragging) return;
+    const left = Math.max(0, ev.clientX - dbgDragOffX);
+    const top = Math.max(0, ev.clientY - dbgDragOffY);
+    dbgBox.style.left = `${left}px`;
+    dbgBox.style.top = `${top}px`;
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (!dbgDragging) return;
+    dbgDragging = false;
+    const rect = dbgBox.getBoundingClientRect();
+    dbgSavePos(rect.left, rect.top);
+  });
 
   const dbgLines = [];
   function nowIso() {
@@ -99,8 +216,8 @@
     const line = `[${nowIso()}] ${msg}`;
     console.log("[AutoGrade]", msg);
     dbgLines.push(line);
-    while (dbgLines.length > 80) dbgLines.shift();
-    dbgBox.textContent = dbgLines.join("\n");
+    while (dbgLines.length > 90) dbgLines.shift();
+    dbgBody.textContent = dbgLines.join("\n");
   }
 
   /***********************
@@ -108,9 +225,8 @@
    ***********************/
   const statBox = document.createElement("div");
   statBox.style =
-    "position: fixed; z-index: 9999; top: 260px; left: 10px; width: 190px; padding: 8px; font-size: 12px; background: rgba(0,0,0,0.75); color: #fff; border-radius: 6px; line-height: 1.5;";
+    "width: 100%; padding: 8px; font-size: 12px; background: rgba(0,0,0,0.75); color: #fff; border-radius: 8px; line-height: 1.5; box-sizing: border-box; white-space: pre-wrap;";
   statBox.textContent = "未加载Excel";
-  document.body.appendChild(statBox);
   const setStat = (t) => (statBox.textContent = t);
 
   /***********************
@@ -126,25 +242,36 @@
       .trim();
   }
 
-  function remarkPreview(s, maxLen = 20) {
+  function remarkPreview(s, maxLen = 18) {
     const t = String(s ?? "").replace(/\s+/g, " ").trim();
     return t.length > maxLen ? t.slice(0, maxLen) + "..." : t;
   }
 
+  function toNumStrMaybe(s) {
+    const t = normText(s);
+    if (!t) return "";
+    const m = t.match(/-?\d+(\.\d+)?/);
+    return m ? m[0] : "";
+  }
+
+  function toIntSafe(s) {
+    const n = parseInt(toNumStrMaybe(s), 10);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
   /***********************
-   * ✅ 轻量消息捕捉：只处理“新增的 message 节点”
+   * ✅ 轻量消息捕捉：只处理新增 message 节点
    ***********************/
   const messageHistory = []; // {ts, tms, seq, text}
-  const MESSAGE_HISTORY_MAX = 160;
+  const MESSAGE_HISTORY_MAX = 180;
   let lastMessageAt = 0;
   let msgSeq = 0;
 
   function pushMessage(text) {
     const t = normText(text);
     if (!t) return;
-
     const last = messageHistory.length ? messageHistory[messageHistory.length - 1].text : "";
-    if (t === last) return; // 去重
+    if (t === last) return;
 
     messageHistory.push({ ts: nowIso(), tms: Date.now(), seq: ++msgSeq, text: t });
     while (messageHistory.length > MESSAGE_HISTORY_MAX) messageHistory.shift();
@@ -162,19 +289,16 @@
       return;
     }
     if (el.querySelectorAll) {
-      const spans = el.querySelectorAll(messageSpanSelector);
-      spans.forEach((sp) => pushMessage(sp.innerText || sp.textContent || ""));
+      el.querySelectorAll(messageSpanSelector).forEach((sp) => pushMessage(sp.innerText || sp.textContent || ""));
     }
   }
 
   function startMessageObserverLight() {
-    // 初始已有 message
     document.querySelectorAll(messageSpanSelector).forEach((sp) => pushMessage(sp.innerText || sp.textContent || ""));
 
     const obs = new MutationObserver((mutations) => {
       for (const m of mutations) {
         if (m.type !== "childList") continue;
-
         for (const n of m.addedNodes) {
           if (n.nodeType !== 1) continue;
           const el = n;
@@ -192,7 +316,7 @@
     });
 
     obs.observe(document.body, { childList: true, subtree: true });
-    dbg("MessageObserver 已启动（轻量：仅新增节点）");
+    dbg("MessageObserver 已启动（轻量）");
     return obs;
   }
 
@@ -233,27 +357,23 @@
     return false;
   }
 
-  // ✅ 等待PDF加载（点击学生后）
   async function waitPdfLoadFlow(sinceTimeMs) {
-    // start 是可选的：有时只弹“加载完成”
+    // start 可选，done 必须
     await waitMessageSinceTime(MSG_START_LOAD, WAIT_START_LOAD_MAX_MS, sinceTimeMs, "start");
     const done = await waitMessageSinceTime(MSG_LOAD_DONE, WAIT_LOAD_DONE_MAX_MS, sinceTimeMs, "done");
     if (!done.ok) throw new Error("等待PDF“加载完成”超时（看右上角 Debug 最近消息）");
-    await waitSilence(AFTER_LOAD_SILENCE_MS, 5000);
+    await waitSilence(AFTER_LOAD_SILENCE_MS, 6000);
   }
 
-  // ✅ 点击提交后：等待保存/成功（可选）+ 最终“加载完成”（必须）
   async function waitAfterSubmitFlow(sinceTimeMs) {
-    // 有些时候会出现“保存并上传中...”“Succeeded”
-    await waitMessageSinceTime(MSG_SAVE_UPLOADING, 5000, sinceTimeMs, "uploading"); // 可选，短等
-    await waitMessageSinceTime(MSG_SUCCEEDED, WAIT_SUBMIT_SUCCEEDED_MAX_MS, sinceTimeMs, "succeeded"); // 可选
-
-    // 提交后往往会重新触发加载pdf：开始加载作业文件 -> 加载完成
-    await waitMessageSinceTime(MSG_START_LOAD, 12000, sinceTimeMs, "reload_start"); // 可选
+    // 可选消息：保存并上传中 / Succeeded
+    await waitMessageSinceTime(MSG_SAVE_UPLOADING, 5000, sinceTimeMs, "uploading");
+    await waitMessageSinceTime(MSG_SUCCEEDED, WAIT_SUBMIT_SUCCEEDED_MAX_MS, sinceTimeMs, "succeeded");
+    // 必须：最终加载完成（提交后会重新加载PDF/刷新）
+    await waitMessageSinceTime(MSG_START_LOAD, 15000, sinceTimeMs, "reload_start");
     const done = await waitMessageSinceTime(MSG_LOAD_DONE, WAIT_AFTER_SUBMIT_LOAD_DONE_MAX_MS, sinceTimeMs, "reload_done");
     if (!done.ok) throw new Error("提交后等待“加载完成”超时（可能保存未生效或页面未刷新）");
-
-    await waitSilence(AFTER_LOAD_SILENCE_MS, 5000);
+    await waitSilence(AFTER_LOAD_SILENCE_MS, 6000);
   }
 
   /***********************
@@ -313,7 +433,7 @@
   }
 
   /***********************
-   * 抽样等级
+   * 抽样等级（由成绩推导）
    ***********************/
   function scoreToLevel(scoreNum) {
     if (scoreNum >= 90 && scoreNum <= 100) return "优";
@@ -343,7 +463,6 @@
       dbg("未找到抽样等级 select");
       return false;
     }
-
     const current = getSamplingLevelFromPage();
     dbg(`抽样等级 当前=${current || "(空)"} 目标=${levelText}`);
     if (current === levelText) return true;
@@ -409,56 +528,141 @@
   }
 
   /***********************
-   * UI：文件/Sheet/开始/暂停/导出日志
+   * UI：文件/Sheet/扫描差异/开始更新/暂停/导出日志
    ***********************/
+  const LEFT_UI_STORE_POS = "AUTO_GRADE_LEFT_UI_POS_V1";
+
+  const leftPanel = document.createElement("div");
+  leftPanel.style =
+    "position: fixed; z-index: 10000; top: 10px; left: 10px; width: 220px; background: rgba(255,255,255,0.92); border: 1px solid rgba(0,0,0,0.18); border-radius: 12px; box-shadow: 0 8px 22px rgba(0,0,0,0.18); overflow: hidden;";
+
+  const leftHeader = document.createElement("div");
+  leftHeader.style =
+    "padding: 8px 10px; font-size: 13px; font-weight: 700; color: #111; background: rgba(0,0,0,0.03); border-bottom: 1px solid rgba(0,0,0,0.08); cursor: move; user-select: none;";
+  leftHeader.textContent = "AutoGrade";
+
+  const leftBody = document.createElement("div");
+  leftBody.style = "padding: 10px; display: flex; flex-direction: column; gap: 8px;";
+
+  leftPanel.appendChild(leftHeader);
+  leftPanel.appendChild(leftBody);
+  document.body.appendChild(leftPanel);
+
+  function leftUiLoadPos() {
+    try {
+      const raw = localStorage.getItem(LEFT_UI_STORE_POS);
+      if (!raw) return null;
+      const p = JSON.parse(raw);
+      if (!p || typeof p.left !== "number" || typeof p.top !== "number") return null;
+      return p;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function leftUiSavePos(left, top) {
+    try {
+      localStorage.setItem(LEFT_UI_STORE_POS, JSON.stringify({ left, top }));
+    } catch (_) {}
+  }
+
+  const leftSavedPos = leftUiLoadPos();
+  if (leftSavedPos) {
+    leftPanel.style.left = `${leftSavedPos.left}px`;
+    leftPanel.style.top = `${leftSavedPos.top}px`;
+  }
+
+  let leftDragging = false;
+  let leftDragOffX = 0;
+  let leftDragOffY = 0;
+
+  leftHeader.addEventListener("mousedown", (ev) => {
+    if (ev.button !== 0) return;
+    const rect = leftPanel.getBoundingClientRect();
+    leftDragging = true;
+    leftDragOffX = ev.clientX - rect.left;
+    leftDragOffY = ev.clientY - rect.top;
+    ev.preventDefault();
+  });
+
+  window.addEventListener("mousemove", (ev) => {
+    if (!leftDragging) return;
+    const left = Math.max(0, ev.clientX - leftDragOffX);
+    const top = Math.max(0, ev.clientY - leftDragOffY);
+    leftPanel.style.left = `${left}px`;
+    leftPanel.style.top = `${top}px`;
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (!leftDragging) return;
+    leftDragging = false;
+    const rect = leftPanel.getBoundingClientRect();
+    leftUiSavePos(rect.left, rect.top);
+  });
+
   const fileInput = document.createElement("input");
   fileInput.type = "file";
   fileInput.accept = ".xlsx,.xls";
-  fileInput.style = `${buttonStyle} top: 10px; left: 10px; background: white; color: black; border: 1px solid black;`;
+  fileInput.style = `${buttonStyle} background: #fff; color: #111; border: 1px solid rgba(0,0,0,0.25);`;
   fileInput.addEventListener("change", handleFile);
-  document.body.appendChild(fileInput);
+  leftBody.appendChild(fileInput);
 
   const sheetSelect = document.createElement("select");
   sheetSelect.style =
-    "position: fixed; z-index: 9999; top: 60px; left: 10px; width: 190px; height: 40px; font-size: 14px; border: 1px solid #333; background: #fff;";
+    "width: 100%; height: 36px; font-size: 14px; border: 1px solid rgba(0,0,0,0.25); background: #fff; border-radius: 8px; padding: 4px 8px; box-sizing: border-box;";
   sheetSelect.disabled = true;
   sheetSelect.addEventListener("change", () => {
     currentSheetName = sheetSelect.value || "";
     dbg(`选择sheet: ${currentSheetName}`);
   });
-  document.body.appendChild(sheetSelect);
+  leftBody.appendChild(sheetSelect);
+
+  const scanButton = document.createElement("button");
+  scanButton.textContent = "扫描差异(预览)";
+  scanButton.style = `${buttonStyle} background: #6f42c1; color: white; cursor: not-allowed;`;
+  scanButton.disabled = true;
+  scanButton.addEventListener("click", () => {
+    if (!currentSheetName) return alert("请先选择sheet！");
+    const plan = buildUpdatePlan(currentSheetName);
+    showPlanPreview(plan);
+  });
+  leftBody.appendChild(scanButton);
 
   const startButton = document.createElement("button");
-  startButton.textContent = "开始更新成绩";
-  startButton.style = `${buttonStyle} top: 110px; left: 10px; background: gray; color: white; cursor: not-allowed;`;
+  startButton.textContent = "开始更新(仅差异)";
+  startButton.style = `${buttonStyle} background: gray; color: white; cursor: not-allowed;`;
   startButton.disabled = true;
   startButton.addEventListener("click", () => {
     if (!currentSheetName) return alert("请先在下拉框选择一个sheet！");
     isPaused = false;
-    compareAndUpdatePage().catch((e) => console.error("[AutoGrade] 执行异常:", e));
+    runUpdatePlan().catch((e) => console.error("[AutoGrade] 执行异常:", e));
   });
-  document.body.appendChild(startButton);
+  leftBody.appendChild(startButton);
 
   const pauseButton = document.createElement("button");
   pauseButton.textContent = "暂停";
-  pauseButton.style = `${buttonStyle} top: 160px; left: 10px; background: #ffc107; color: black;`;
+  pauseButton.style = `${buttonStyle} background: #ffc107; color: black;`;
   pauseButton.addEventListener("click", () => {
     isPaused = true;
     dbg("已暂停");
   });
-  document.body.appendChild(pauseButton);
+  leftBody.appendChild(pauseButton);
 
   const exportLogButton = document.createElement("button");
   exportLogButton.textContent = "导出日志CSV";
-  exportLogButton.style = `${buttonStyle} top: 210px; left: 10px; background: #17a2b8; color: white;`;
+  exportLogButton.style = `${buttonStyle} background: #17a2b8; color: white;`;
   exportLogButton.addEventListener("click", () => exportLogsCsv());
-  document.body.appendChild(exportLogButton);
+  leftBody.appendChild(exportLogButton);
+
+  // Status box goes into the left panel (avoid overlap)
+  leftBody.appendChild(statBox);
 
   /***********************
    * 日志CSV
    ***********************/
   let runLogs = [];
   let runSummary = { sheet: "", total: 0, updated: 0, skipped: 0, notFound: 0, failed: 0, startedAt: "", finishedAt: "" };
+  let lastPlan = null;
 
   function csvEscape(v) {
     const s = String(v ?? "");
@@ -468,7 +672,7 @@
 
   function exportLogsCsv() {
     if (!runLogs.length) return alert("当前没有日志可导出（请先执行一次）");
-    const headers = ["ts", "sheet", "status", "name", "sid", "page_grade", "excel_grade", "page_level", "excel_level", "remark_preview", "note"];
+    const headers = ["ts", "sheet", "status", "name", "sid", "list_grade", "list_level", "excel_grade", "excel_level", "remark_preview", "note"];
     const lines = [headers.join(",")];
     for (const r of runLogs) lines.push(headers.map((k) => csvEscape(r[k])).join(","));
 
@@ -482,6 +686,20 @@
     a.download = filename;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  function showPlanPreview(plan) {
+    const lines = [];
+    lines.push(`sheet=${plan.sheet}`);
+    lines.push(`页面学生=${plan.pageTotal} | Excel记录=${plan.excelTotal}`);
+    lines.push(`需要更新=${plan.toUpdate.length} | Excel未找到=${plan.notFound.length} | 跳过一致=${plan.same.length}`);
+    lines.push("");
+    lines.push("前20条待更新（姓名: 列表成绩/等级 -> 目标成绩/等级）");
+    plan.toUpdate.slice(0, 20).forEach((x, idx) => {
+      lines.push(`${idx + 1}. ${x.name}: ${x.listScore || "-"} / ${x.listLevel || "-"} -> ${x.excelScore || "-"} / ${x.excelLevel || "-"}`);
+    });
+    if (plan.toUpdate.length > 20) lines.push(`... 还有 ${plan.toUpdate.length - 20} 条`);
+    alert(lines.join("\n"));
   }
 
   /***********************
@@ -534,12 +752,19 @@
 
         const list = rows
           .slice(startDataRow)
-          .map((r) => ({
-            学号: idIdx !== -1 ? normText(r[idIdx]) : "",
-            姓名: normText(r[nameIdx]),
-            成绩: normText(r[gradeIdx]),
-            评语: remarkIdx !== -1 ? normText(r[remarkIdx]) : "",
-          }))
+          .map((r) => {
+            const g = normText(r[gradeIdx]);
+            const gNumStr = toNumStrMaybe(g);
+            const gNum = parseInt(gNumStr || "", 10);
+            const level = Number.isFinite(gNum) ? scoreToLevel(gNum) : "";
+            return {
+              学号: idIdx !== -1 ? normText(r[idIdx]) : "",
+              姓名: normText(r[nameIdx]),
+              成绩: gNumStr || normText(g),
+              评语: remarkIdx !== -1 ? normText(r[remarkIdx]) : "",
+              等级: level,
+            };
+          })
           .filter((x) => x.姓名);
 
         tmp[sn] = list;
@@ -567,36 +792,58 @@
       sheetSelect.disabled = false;
       currentSheetName = "";
 
+      scanButton.disabled = false;
+      scanButton.style.cursor = "pointer";
+      scanButton.style.background = "#6f42c1";
+
       startButton.disabled = false;
       startButton.style.background = "#28a745";
       startButton.style.cursor = "pointer";
 
-      setStat(`Excel加载完成\n可用sheet: ${Object.keys(tmp).length}/${sheetNames.length}\n请选择sheet后开始`);
+      setStat(`Excel加载完成\n可用sheet: ${Object.keys(tmp).length}/${sheetNames.length}\n先点“扫描差异”`);
       dbg(`Excel加载完成 可用sheet=${Object.keys(tmp).length}/${sheetNames.length}`);
       if (skipped.length) dbg(`跳过sheet: ${skipped.join(" | ")}`);
 
-      alert("Excel加载成功！请选择对应sheet后点击开始。");
+      alert("Excel加载成功！请选择对应sheet后，先点“扫描差异(预览)”，确认无误再点“开始更新”。");
     };
 
     reader.readAsArrayBuffer(file);
   }
 
   /***********************
-   * 页面学生列表 & 匹配
+   * ✅ 从页面“列表”抓取：姓名/列表等级/列表成绩
    ***********************/
-  function getStudentListFromPage() {
-    const elements = document.querySelectorAll(studentCardSelector);
-    const list = Array.from(elements)
+  function getStudentListFromPageWithGradeLevel() {
+    const rows = Array.from(document.querySelectorAll(studentCardSelector)).filter((el) => el.offsetParent !== null);
+
+    const list = rows
       .map((div) => {
         const link = div.querySelector(clickStudentLinkSelector);
-        const name = link?.firstChild?.textContent ? normText(link.firstChild.textContent) : "";
+        if (!link) return null;
+
+        // 名字在 a 的第一个 text node
+        const name = normText(link.childNodes?.[0]?.textContent || link.firstChild?.textContent || "");
+
+        // a 内部的 span 是“优/良/中/差”（有时空）
+        const levelSpan = link.querySelector("span");
+        const listLevel = normText(levelSpan?.innerText || "");
+
+        // 右侧 span float right 是成绩/未批阅
+        const scoreSpan = div.querySelector("span[style*='float: right']");
+        const listScoreRaw = normText(scoreSpan?.innerText || "");
+        const listScoreNum = toNumStrMaybe(listScoreRaw);
+        const listScore = listScoreNum || listScoreRaw;
+
+        // 学号（可选：从整行 text 抓 6~12 位数字）
         const text = normText(div.textContent || "");
         const idMatch = text.match(/(\d{6,12})/);
         const sid = idMatch ? idMatch[1] : "";
-        return { sid, name };
+
+        return { sid, name, listLevel, listScore };
       })
-      .filter((x) => x.name);
-    dbg(`页面学生数=${list.length}`);
+      .filter((x) => x && x.name);
+
+    dbg(`列表抓取：学生数=${list.length}`);
     return list;
   }
 
@@ -610,81 +857,204 @@
   }
 
   /***********************
-   * 主流程
+   * ✅ 先构建更新计划：只更新不一致的
    ***********************/
-  async function compareAndUpdatePage() {
-    const sheetName = currentSheetName;
-    if (!sheetName || !studentDataBySheet[sheetName]) return alert("请选择有效的sheet！");
+  function buildUpdatePlan(sheetName) {
+    const pageList = getStudentListFromPageWithGradeLevel();
+    const excelArr = studentDataBySheet[sheetName] || [];
 
-    const pageStudents = getStudentListFromPage();
+    const plan = {
+      sheet: sheetName,
+      pageTotal: pageList.length,
+      excelTotal: excelArr.length,
+      toUpdate: [],
+      same: [],
+      notFound: [],
+    };
 
-    runLogs = [];
-    runSummary = { sheet: sheetName, total: pageStudents.length, updated: 0, skipped: 0, notFound: 0, failed: 0, startedAt: nowIso(), finishedAt: "" };
-    runLogs.push({ ts: nowIso(), sheet: sheetName, status: "START", name: "", sid: "", page_grade: "", excel_grade: "", page_level: "", excel_level: "", remark_preview: "", note: `开始，总人数=${pageStudents.length}` });
-
-    for (let i = 0; i < pageStudents.length; i++) {
-      if (isPaused) break;
-
-      const ps = pageStudents[i];
+    for (const ps of pageList) {
       const rec = findStudentRecord(sheetName, ps);
-
       if (!rec) {
-        runSummary.notFound++;
-        runLogs.push({ ts: nowIso(), sheet: sheetName, status: "NOT_FOUND", name: ps.name, sid: ps.sid || "", page_grade: "", excel_grade: "", page_level: "", excel_level: "", remark_preview: "", note: "Excel中未找到该学生" });
+        plan.notFound.push(ps);
         continue;
       }
 
-      const excelGradeStr = String(rec.成绩 ?? "").match(/-?\d+(\.\d+)?/)?.[0] ?? "";
-      const excelScoreNum = Number(excelGradeStr);
-      const excelLevel = Number.isNaN(excelScoreNum) ? "" : scoreToLevel(excelScoreNum);
+      const excelScore = normText(rec.成绩);
+      const excelLevel = normText(rec.等级);
+
+      const listScore = normText(ps.listScore);
+      const listLevel = normText(ps.listLevel);
+
+      const isUnmarked = listScore.includes("未批阅") || listScore === "";
+      if (UPDATE_UNMARKED_ONLY && !isUnmarked) {
+        plan.same.push({ ...ps, excelScore, excelLevel, note: "仅更新未批阅，跳过已批阅" });
+        continue;
+      }
+
+      const sameScore = normText(toNumStrMaybe(listScore) || listScore) === normText(excelScore);
+      const sameLevel = listLevel === excelLevel;
+
+      if (!FORCE_OVERWRITE && sameScore && sameLevel) {
+        plan.same.push({ ...ps, excelScore, excelLevel });
+      } else {
+        plan.toUpdate.push({ ...ps, excelScore, excelLevel, rec });
+      }
+    }
+
+    dbg(`扫描差异：toUpdate=${plan.toUpdate.length}, same=${plan.same.length}, notFound=${plan.notFound.length}`);
+    return plan;
+  }
+
+  /***********************
+   * ✅ 仅按计划更新
+   ***********************/
+  async function runUpdatePlan() {
+    const sheetName = currentSheetName;
+    if (!sheetName || !studentDataBySheet[sheetName]) return alert("请选择有效的sheet！");
+
+    // 生成计划（保证“开始更新”永远只对差异动手）
+    lastPlan = buildUpdatePlan(sheetName);
+
+    runLogs = [];
+    runSummary = {
+      sheet: sheetName,
+      total: lastPlan.toUpdate.length,
+      updated: 0,
+      skipped: lastPlan.same.length,
+      notFound: lastPlan.notFound.length,
+      failed: 0,
+      startedAt: nowIso(),
+      finishedAt: "",
+    };
+
+    runLogs.push({
+      ts: nowIso(),
+      sheet: sheetName,
+      status: "START",
+      name: "",
+      sid: "",
+      list_grade: "",
+      list_level: "",
+      excel_grade: "",
+      excel_level: "",
+      remark_preview: "",
+      note: `开始：待更新=${lastPlan.toUpdate.length}, 一致跳过=${lastPlan.same.length}, 未找到=${lastPlan.notFound.length}`,
+    });
+
+    if (!lastPlan.toUpdate.length) {
+      runSummary.finishedAt = nowIso();
+      runLogs.push({
+        ts: nowIso(),
+        sheet: sheetName,
+        status: "END",
+        name: "",
+        sid: "",
+        list_grade: "",
+        list_level: "",
+        excel_grade: "",
+        excel_level: "",
+        remark_preview: "",
+        note: "无需更新（全部一致或无可用记录）",
+      });
+      alert("无需更新：页面列表与Excel一致。");
+      return;
+    }
+
+    for (let i = 0; i < lastPlan.toUpdate.length; i++) {
+      if (isPaused) break;
+
+      const item = lastPlan.toUpdate[i];
+      const ps = { sid: item.sid, name: item.name, listLevel: item.listLevel, listScore: item.listScore };
+      const rec = item.rec;
+
+      const excelGradeStr = item.excelScore;
+      const excelLevel = item.excelLevel;
 
       const perStudentStart = Date.now();
       try {
-        const res = await Promise.race([
-          openCompareAndMaybeUpdate(ps, rec, excelGradeStr, excelLevel),
+        await Promise.race([
+          updateOneStudent(ps, rec, excelGradeStr, excelLevel),
           (async () => {
             while (Date.now() - perStudentStart < PER_STUDENT_HARD_TIMEOUT_MS) await sleep(200);
             throw new Error(`单个学生处理超时>${PER_STUDENT_HARD_TIMEOUT_MS}ms，自动跳过`);
           })(),
         ]);
 
-        if (res.status === "SKIP") {
-          runSummary.skipped++;
-          runLogs.push({ ts: nowIso(), sheet: sheetName, status: "SKIP", name: ps.name, sid: ps.sid || "", page_grade: res.pageGrade, excel_grade: excelGradeStr, page_level: res.pageLevel, excel_level: excelLevel, remark_preview: remarkPreview(rec.评语), note: "成绩与等级均一致，跳过" });
-        } else {
-          runSummary.updated++;
-          runLogs.push({ ts: nowIso(), sheet: sheetName, status: "UPDATED", name: ps.name, sid: ps.sid || "", page_grade: res.pageGrade, excel_grade: excelGradeStr, page_level: res.pageLevel, excel_level: excelLevel, remark_preview: remarkPreview(rec.评语), note: "已提交更新并等待加载完成" });
-        }
+        runSummary.updated++;
+        runLogs.push({
+          ts: nowIso(),
+          sheet: sheetName,
+          status: "UPDATED",
+          name: ps.name,
+          sid: ps.sid || "",
+          list_grade: ps.listScore,
+          list_level: ps.listLevel,
+          excel_grade: excelGradeStr,
+          excel_level: excelLevel,
+          remark_preview: remarkPreview(rec.评语),
+          note: "已提交并等待加载完成",
+        });
       } catch (e) {
         runSummary.failed++;
-        runLogs.push({ ts: nowIso(), sheet: sheetName, status: "FAILED", name: ps.name, sid: ps.sid || "", page_grade: "", excel_grade: excelGradeStr, page_level: "", excel_level: excelLevel, remark_preview: remarkPreview(rec.评语), note: String(e?.message || e) });
+        runLogs.push({
+          ts: nowIso(),
+          sheet: sheetName,
+          status: "FAILED",
+          name: ps.name,
+          sid: ps.sid || "",
+          list_grade: ps.listScore,
+          list_level: ps.listLevel,
+          excel_grade: excelGradeStr,
+          excel_level: excelLevel,
+          remark_preview: remarkPreview(rec.评语),
+          note: String(e?.message || e),
+        });
         dbg(`失败/超时：${String(e?.message || e)}`);
         dbg(`最近消息：${messageHistory.slice(-10).map((x) => x.text).join(" | ") || "无"}`);
       }
 
-      setStat(`进行中 ${i + 1}/${runSummary.total}\n更新:${runSummary.updated} 跳过:${runSummary.skipped}\n未找到:${runSummary.notFound} 失败:${runSummary.failed}`);
+      setStat(
+        `计划更新 ${i + 1}/${runSummary.total}\n已更新:${runSummary.updated}\n一致跳过:${runSummary.skipped}\n未找到:${runSummary.notFound} 失败:${runSummary.failed}`
+      );
     }
 
     runSummary.finishedAt = nowIso();
-    runLogs.push({ ts: nowIso(), sheet: sheetName, status: "END", name: "", sid: "", page_grade: "", excel_grade: "", page_level: "", excel_level: "", remark_preview: "", note: `完成 updated=${runSummary.updated}, skipped=${runSummary.skipped}, notFound=${runSummary.notFound}, failed=${runSummary.failed}` });
+    runLogs.push({
+      ts: nowIso(),
+      sheet: sheetName,
+      status: "END",
+      name: "",
+      sid: "",
+      list_grade: "",
+      list_level: "",
+      excel_grade: "",
+      excel_level: "",
+      remark_preview: "",
+      note: `完成：updated=${runSummary.updated}, skipped=${runSummary.skipped}, notFound=${runSummary.notFound}, failed=${runSummary.failed}`,
+    });
 
     dbg(`完成：updated=${runSummary.updated}, skipped=${runSummary.skipped}, notFound=${runSummary.notFound}, failed=${runSummary.failed}`);
-    alert(`执行完成！\n总:${runSummary.total}\n更新:${runSummary.updated}\n跳过:${runSummary.skipped}\n未找到:${runSummary.notFound}\n失败:${runSummary.failed}\n可点击“导出日志CSV”下载日志。`);
+    alert(
+      `执行完成（仅差异）！\n待更新:${runSummary.total}\n已更新:${runSummary.updated}\n一致跳过:${runSummary.skipped}\nExcel未找到:${runSummary.notFound}\n失败:${runSummary.failed}\n可点击“导出日志CSV”下载日志。`
+    );
   }
 
-  async function openCompareAndMaybeUpdate(pageStudent, rec, excelGradeStr, excelLevel) {
-    dbg(`处理学生: ${pageStudent.name}`);
+  /***********************
+   * 更新单个学生（点击→等PDF→填→提交→等加载完成）
+   ***********************/
+  async function updateOneStudent(pageStudent, rec, excelGradeStr, excelLevel) {
+    dbg(`更新学生: ${pageStudent.name} (${pageStudent.listScore}/${pageStudent.listLevel} -> ${excelGradeStr}/${excelLevel})`);
 
-    // ✅ 关键：用时间窗（解决自动加载/竞态）
+    // 用时间窗：点击前
     const sinceTime = Date.now();
 
     const studentElement = Array.from(document.querySelectorAll(studentCardSelector)).find((div) =>
       normText(div.textContent || "").includes(pageStudent.name)
     );
-    if (!studentElement) return { status: "SKIP", pageGrade: "", pageLevel: "" };
+    if (!studentElement) throw new Error("找不到该学生行（可能列表未渲染/滚动）");
 
     const link = studentElement.querySelector(clickStudentLinkSelector);
-    if (!link) return { status: "SKIP", pageGrade: "", pageLevel: "" };
+    if (!link) throw new Error("找不到学生链接a");
 
     link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
     await sleep(AFTER_CLICK_DELAY);
@@ -700,20 +1070,6 @@
     if (!gradeInput) throw new Error("未找到成绩输入框");
 
     const remarkInput = findInputLike(PAGE_INPUT_HINTS.remark, true) || findInputLike(PAGE_INPUT_HINTS.remark, false);
-
-    const pageGradeNow = normText(gradeInput.value || "");
-    const pageGradeNumStr = pageGradeNow.match(/-?\d+(\.\d+)?/)?.[0] ?? pageGradeNow;
-    const pageLevel = getSamplingLevelFromPage();
-
-    const sameGrade = normText(pageGradeNumStr) === normText(excelGradeStr);
-    const sameLevel = normText(pageLevel) === normText(excelLevel);
-
-    dbg(`比较：页面成绩=${pageGradeNumStr} 目标=${excelGradeStr} sameGrade=${sameGrade}`);
-    dbg(`比较：页面等级=${pageLevel} 目标=${excelLevel} sameLevel=${sameLevel}`);
-
-    if (!FORCE_OVERWRITE && sameGrade && sameLevel) {
-      return { status: "SKIP", pageGrade: pageGradeNumStr, pageLevel };
-    }
 
     dbg(`填成绩: ${excelGradeStr}`);
     fillInputControlled(gradeInput, excelGradeStr);
@@ -735,12 +1091,11 @@
 
     gradeInput.dispatchEvent(new Event("change", { bubbles: true }));
     gradeInput.dispatchEvent(new Event("blur", { bubbles: true }));
-    await sleep(200);
+    await sleep(250);
 
     const submitButton = document.querySelector(submitButtonSelector);
     if (!submitButton) throw new Error("未找到提交按钮");
 
-    // ✅ 点击提交后，再等一轮“提交->重新加载->加载完成”
     const submitSince = Date.now();
     dbg("点击提交");
     submitButton.click();
@@ -748,12 +1103,11 @@
     dbg("提交后等待消息（Succeeded/加载完成）...");
     await waitAfterSubmitFlow(submitSince);
 
-    await sleep(AFTER_SUBMIT_DELAY);
-    return { status: "UPDATED", pageGrade: pageGradeNumStr, pageLevel };
+    await sleep(300);
   }
 
   /***********************
-   * 启动：只启动轻量消息监听（不触发任何等待/点击）
+   * 启动：只启动轻量消息监听
    ***********************/
   startMessageObserverLight();
 
