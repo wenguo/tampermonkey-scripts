@@ -544,6 +544,8 @@
   pauseButton.style = `${buttonStyle} background: #ffc107; color: black;`;
   pauseButton.addEventListener("click", () => {
     isPaused = true;
+    progressState.phase = "已暂停";
+    updateStatProgress();
     dbg("已暂停");
   });
   dockLeft.appendChild(pauseButton);
@@ -563,6 +565,29 @@
   let runLogs = [];
   let runSummary = { sheet: "", total: 0, updated: 0, skipped: 0, notFound: 0, failed: 0, startedAt: "", finishedAt: "" };
   let lastPlan = null;
+
+  let progressState = { sheet: "", idx: 0, total: 0, name: "", phase: "" };
+
+  function updateStatProgress(note) {
+    const lines = [];
+
+    if (note) lines.push(String(note).replace(/[\r\n\t]+/g, " ").slice(0, 160));
+    if (progressState.sheet) lines.push(`sheet: ${progressState.sheet}`);
+
+    const total = Number(progressState.total) || 0;
+    const idx = Number(progressState.idx) || 0;
+    if (total > 0) lines.push(`进度: ${idx}/${total}`);
+    if (progressState.name) lines.push(`当前: ${progressState.name}`);
+    if (progressState.phase) lines.push(`阶段: ${progressState.phase}`);
+
+    if (runSummary && (runSummary.total || runSummary.updated || runSummary.failed || runSummary.skipped || runSummary.notFound)) {
+      lines.push(`已更新:${runSummary.updated}`);
+      lines.push(`一致跳过:${runSummary.skipped}`);
+      lines.push(`未找到:${runSummary.notFound} 失败:${runSummary.failed}`);
+    }
+
+    setStat(lines.join("\n"));
+  }
 
   function csvEscape(v) {
     const s = String(v ?? "");
@@ -827,6 +852,9 @@
       finishedAt: "",
     };
 
+    progressState = { sheet: sheetName, idx: 0, total: runSummary.total, name: "", phase: "准备开始" };
+    updateStatProgress();
+
     runLogs.push({
       ts: nowIso(),
       sheet: sheetName,
@@ -870,6 +898,12 @@
       const excelGradeStr = item.excelScore;
       const excelLevel = item.excelLevel;
 
+      progressState.idx = i + 1;
+      progressState.total = runSummary.total;
+      progressState.name = ps.name;
+      progressState.phase = "开始处理";
+      updateStatProgress();
+
       const perStudentStart = Date.now();
       try {
         await Promise.race([
@@ -911,11 +945,17 @@
         });
         dbg(`失败/超时：${String(e?.message || e)}`);
         dbg(`最近消息：${messageHistory.slice(-10).map((x) => x.text).join(" | ") || "无"}`);
+
+        progressState.phase = "失败";
+        updateStatProgress(String(e?.message || e));
       }
 
-      setStat(
-        `计划更新 ${i + 1}/${runSummary.total}\n已更新:${runSummary.updated}\n一致跳过:${runSummary.skipped}\n未找到:${runSummary.notFound} 失败:${runSummary.failed}`
-      );
+      if (isPaused) {
+        progressState.phase = "已暂停";
+      } else {
+        progressState.phase = "完成当前";
+      }
+      updateStatProgress();
     }
 
     runSummary.finishedAt = nowIso();
@@ -945,6 +985,9 @@
   async function updateOneStudent(pageStudent, rec, excelGradeStr, excelLevel) {
     dbg(`更新学生: ${pageStudent.name} (${pageStudent.listScore}/${pageStudent.listLevel} -> ${excelGradeStr}/${excelLevel})`);
 
+    progressState.phase = "点击学生";
+    updateStatProgress();
+
     // 用时间窗：点击前
     const sinceTime = Date.now();
 
@@ -960,6 +1003,8 @@
     await sleep(AFTER_CLICK_DELAY);
 
     dbg("等待PDF加载流程...");
+    progressState.phase = "等待加载完成";
+    updateStatProgress();
     await waitPdfLoadFlow(sinceTime);
     dbg("PDF加载完成且静默，开始填写");
     await sleep(STEP_DELAY_MS);
@@ -972,17 +1017,23 @@
     const remarkInput = findInputLike(PAGE_INPUT_HINTS.remark, true) || findInputLike(PAGE_INPUT_HINTS.remark, false);
 
     dbg(`填成绩: ${excelGradeStr}`);
+    progressState.phase = "填写成绩";
+    updateStatProgress();
     fillInputControlled(gradeInput, excelGradeStr);
     await sleep(GRADE_INPUT_TEST_DELAY_MS);
 
     if (excelLevel) {
       dbg(`设置等级: ${excelLevel}`);
+      progressState.phase = "设置抽样等级";
+      updateStatProgress();
       await setSamplingLevel(excelLevel);
       await sleep(STEP_DELAY_MS);
     }
 
     if (remarkInput) {
       dbg(`填评语: ${remarkPreview(rec.评语)}`);
+      progressState.phase = "填写评语";
+      updateStatProgress();
       fillInputControlled(remarkInput, rec.评语 || "");
       await sleep(STEP_DELAY_MS);
     } else {
@@ -998,12 +1049,18 @@
 
     const submitSince = Date.now();
     dbg("点击提交");
+    progressState.phase = "提交";
+    updateStatProgress();
     submitButton.click();
 
     dbg("提交后等待消息（Succeeded/加载完成）...");
+    progressState.phase = "等待提交完成";
+    updateStatProgress();
     await waitAfterSubmitFlow(submitSince);
 
     await sleep(300);
+    progressState.phase = "完成";
+    updateStatProgress();
   }
 
   /***********************
