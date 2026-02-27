@@ -334,6 +334,22 @@
     await waitSilence(AFTER_LOAD_SILENCE_MS, 6000);
   }
 
+  function hasAnyMessageSince(tsMs) {
+    for (let i = 0; i < messageHistory.length; i++) if (messageHistory[i].tms >= tsMs) return true;
+    return false;
+  }
+
+  function isMarkingUiReady() {
+    const gradeInput =
+      document.querySelector("input.ivu-input-number-input[placeholder='请输入作业成绩']") ||
+      findInputLike(PAGE_INPUT_HINTS.grade, false);
+    const submitButton = document.querySelector(submitButtonSelector);
+
+    if (!gradeInput || gradeInput.disabled || gradeInput.offsetParent === null) return false;
+    if (!submitButton || submitButton.disabled || submitButton.offsetParent === null) return false;
+    return true;
+  }
+
   async function waitAfterSubmitFlow(sinceTimeMs) {
     // 可选消息：保存并上传中 / Succeeded
     await waitMessageSinceTime(MSG_SAVE_UPLOADING, 5000, sinceTimeMs, "uploading");
@@ -1005,7 +1021,18 @@
     dbg("等待PDF加载流程...");
     progressState.phase = "等待加载完成";
     updateStatProgress();
-    await waitPdfLoadFlow(sinceTime);
+
+    try {
+      await waitPdfLoadFlow(sinceTime);
+    } catch (e) {
+      // 首个学生常见：页面进入时已自动加载过一次PDF，点击第一个学生时不再弹出加载消息。
+      // 这种情况下 sinceTime 之后没有新 message，但页面控件已就绪，可以直接继续。
+      if (!hasAnyMessageSince(sinceTime) && isMarkingUiReady()) {
+        dbg("未捕捉到新的加载消息，但页面控件已就绪，跳过等待");
+      } else {
+        throw e;
+      }
+    }
     dbg("PDF加载完成且静默，开始填写");
     await sleep(STEP_DELAY_MS);
 
