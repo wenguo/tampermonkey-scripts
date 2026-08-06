@@ -738,6 +738,13 @@
   /***********************
    * ✅ 从页面“列表”抓取：姓名/列表等级/列表成绩
    ***********************/
+  function cardName(div) {
+    const link = div.querySelector(clickStudentLinkSelector);
+    if (!link) return "";
+    // 名字在 a 的第一个 text node
+    return normText(link.childNodes?.[0]?.textContent || link.firstChild?.textContent || "");
+  }
+
   function getStudentListFromPageWithGradeLevel() {
     const rows = Array.from(document.querySelectorAll(studentCardSelector)).filter((el) => el.offsetParent !== null);
 
@@ -747,7 +754,7 @@
         if (!link) return null;
 
         // 名字在 a 的第一个 text node
-        const name = normText(link.childNodes?.[0]?.textContent || link.firstChild?.textContent || "");
+        const name = cardName(div);
 
         // a 内部的 span 是“优/良/中/差”（有时空）
         const levelSpan = link.querySelector("span");
@@ -991,9 +998,10 @@
     // 用时间窗：点击前
     const sinceTime = Date.now();
 
-    const studentElement = Array.from(document.querySelectorAll(studentCardSelector)).find((div) =>
-      normText(div.textContent || "").includes(pageStudent.name)
-    );
+    const studentElement = Array.from(document.querySelectorAll(studentCardSelector)).find((div) => {
+      const n = cardName(div);
+      return n && n === pageStudent.name;
+    });
     if (!studentElement) throw new Error("找不到该学生行（可能列表未渲染/滚动）");
 
     const link = studentElement.querySelector(clickStudentLinkSelector);
