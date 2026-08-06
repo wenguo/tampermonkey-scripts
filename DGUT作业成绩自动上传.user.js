@@ -88,8 +88,22 @@
 
   const dockHeader = document.createElement("div");
   dockHeader.style =
-    "padding: 8px 10px; font-size: 13px; font-weight: 700; color: #111; background: rgba(0,0,0,0.03); border-bottom: 1px solid rgba(0,0,0,0.08); cursor: move; user-select: none;";
-  dockHeader.textContent = "AutoGrade";
+    "padding: 8px 10px; font-size: 13px; font-weight: 700; color: #111; background: rgba(0,0,0,0.03); border-bottom: 1px solid rgba(0,0,0,0.08); cursor: move; user-select: none; display: flex; align-items: center; justify-content: space-between;";
+
+  const dockTitle = document.createElement("span");
+  dockTitle.textContent = "AutoGrade";
+  dockHeader.appendChild(dockTitle);
+
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "×";
+  closeBtn.title = "关闭";
+  closeBtn.style =
+    "border: none; background: transparent; cursor: pointer; font-size: 18px; font-weight: 700; color: #888; line-height: 1; padding: 0 2px;";
+  closeBtn.addEventListener("mousedown", (ev) => ev.stopPropagation());
+  closeBtn.addEventListener("click", () => {
+    dock.style.display = "none";
+  });
+  dockHeader.appendChild(closeBtn);
 
   const dockBody = document.createElement("div");
   dockBody.style =
